@@ -1,81 +1,102 @@
-import { Telegraf, Markup } from 'telegraf';
-import dotenv from 'dotenv';
+import { Telegraf, Markup, session } from "telegraf";
+import dotenv from "dotenv";
 dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
+bot.use(session());
+
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME;
+const RATE = 0.98; // 250 Stars = 0.98 USDT
+const AMOUNTS = [250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000];
 
-// Conversion settings
-const MIN_STARS = 250;
-const MAX_STARS = 50000;
-const RATE_USDT = 0.98; // per 250 stars = 0.98 USDT
+// === Helper functions ===
+const isValidUSDT = (addr) => /^0x[a-fA-F0-9]{40}$/.test(addr);
+const isValidTON = (addr) => /^(EQ|kQ)[A-Za-z0-9_-]{48}$/.test(addr);
 
-// Start command
+const calcUSDT = (stars) => ((stars / 250) * RATE).toFixed(2);
+
+// === Start Command ===
 bot.start((ctx) => {
+  ctx.session = {};
   ctx.reply(
     `🌟 Welcome ${ctx.from.first_name}!\n\n` +
-    `You can convert your Telegram Stars balance into USDT or TON.\n\n` +
-    `💰 Rate: 250 Stars = 0.98 USDT\n` +
-    `📉 Minimum: 250 Stars\n📈 Maximum: 50,000 Stars\n\n` +
-    `Click "Sell Stars" to begin.`,
-    Markup.inlineKeyboard([
-      [Markup.button.callback("💸 Sell Stars", "SELL_STARS")]
-    ])
+      `You can convert your Telegram Stars into USDT or TON.\n\n` +
+      `💰 Rate: 250 Stars = 0.98 USDT\n` +
+      `📉 Minimum: 250 Stars\n📈 Maximum: 100,000 Stars\n\nChoose how much you want to sell:`,
+    Markup.inlineKeyboard(
+      AMOUNTS.map((amt) => [
+        Markup.button.callback(`${amt} ⭐ = ${calcUSDT(amt)} USDT`, `SELL_${amt}`)
+      ])
+    )
   );
 });
 
-// Sell stars flow
-bot.action("SELL_STARS", (ctx) => {
-  ctx.reply("Enter the amount of Stars you want to sell (between 250 and 50000):");
-  ctx.session = { ...ctx.session, awaitingAmount: true };
+// === Amount Selection ===
+bot.action(/SELL_(\d+)/, async (ctx) => {
+  const stars = Number(ctx.match[1]);
+  ctx.session.stars = stars;
+  ctx.session.amountUSD = calcUSDT(stars);
+  await ctx.answerCbQuery();
+
+  await ctx.reply(
+    `You selected *${stars} Stars* (~${ctx.session.amountUSD} USDT)\n\nChoose how you want to receive your payment:`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("💵 Receive in USDT (BEP20)", "PAY_USDT")],
+        [Markup.button.callback("💎 Receive in TON", "PAY_TON")]
+      ])
+    }
+  );
 });
 
+// === User chooses USDT ===
+bot.action("PAY_USDT", async (ctx) => {
+  ctx.session.method = "USDT";
+  await ctx.answerCbQuery();
+  await ctx.reply("Please enter your *USDT BEP20 wallet address:*", { parse_mode: "Markdown" });
+  ctx.session.awaitingAddress = true;
+});
+
+// === User chooses TON ===
+bot.action("PAY_TON", async (ctx) => {
+  ctx.session.method = "TON";
+  await ctx.answerCbQuery();
+  await ctx.reply("Please enter your *TON wallet address:*", { parse_mode: "Markdown" });
+  ctx.session.awaitingAddress = true;
+});
+
+// === Address Validation ===
 bot.on("text", async (ctx) => {
-  const text = ctx.message.text;
-  const amount = parseFloat(text);
+  if (ctx.session.awaitingAddress) {
+    const addr = ctx.message.text.trim();
+    const method = ctx.session.method;
 
-  if (ctx.session?.awaitingAmount) {
-    if (isNaN(amount)) return ctx.reply("❌ Please enter a valid number.");
-    if (amount < MIN_STARS) return ctx.reply(`⚠️ Minimum amount is ${MIN_STARS} Stars.`);
-    if (amount > MAX_STARS) return ctx.reply(`⚠️ Maximum amount is ${MAX_STARS} Stars.`);
+    if (method === "USDT" && !isValidUSDT(addr))
+      return ctx.reply("⚠️ Please provide a valid USDT BEP20 address (starts with 0x...)");
 
-    const usdtValue = (amount / 250) * RATE_USDT;
+    if (method === "TON" && !isValidTON(addr))
+      return ctx.reply("⚠️ Please provide a valid TON address.");
 
-    ctx.reply(
-      `✅ You’re selling *${amount} Stars*.\n` +
-      `💵 You will receive approximately *${usdtValue.toFixed(2)} USDT*.\n\n` +
-      `Once you click below, you’ll be redirected to pay with Stars.`,
-      {
-        parse_mode: "Markdown",
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback("⭐ PAY WITH STARS", `PAY_${amount}`)]
-        ])
-      }
+    ctx.session.address = addr;
+    ctx.session.awaitingAddress = false;
+
+    await ctx.reply(
+      `✅ Perfect!\n\n` +
+        `You are selling *${ctx.session.stars} Stars* (~${ctx.session.amountUSD} USDT)\n` +
+        `You will receive in *${method}*:\n\`${addr}\`\n\n` +
+        `⏳ Your withdrawal is being processed.\nEstimated time: *5 minutes to 1 hour*.`,
+      { parse_mode: "Markdown" }
     );
-    ctx.session.awaitingAmount = false;
+
+    // Notify admin
+    await bot.telegram.sendMessage(
+      `@${ADMIN_USERNAME}`,
+      `📩 *New Conversion Request*\n\n👤 User: @${ctx.from.username || ctx.from.first_name}\n⭐ Stars: ${ctx.session.stars}\n💰 Amount: ${ctx.session.amountUSD} USDT\n💱 Method: ${method}\n🏦 Address: ${addr}`,
+      { parse_mode: "Markdown" }
+    );
   }
 });
 
-bot.action(/PAY_(\d+)/, async (ctx) => {
-  const amount = ctx.match[1];
-  await ctx.reply(
-    `💫 To complete the transaction:\n\n` +
-    `1️⃣ Pay ${amount} Stars via Telegram.\n` +
-    `2️⃣ Once done, please send a screenshot proof here.\n\n` +
-    `💰 Your payout (USDT/TON) will be processed manually by admin.`
-  );
-
-  await bot.telegram.sendMessage(
-    ctx.chat.id,
-    `📨 Admin will verify your payment soon.`
-  );
-
-  // Notify admin
-  await bot.telegram.sendMessage(
-    `@${ADMIN_USERNAME}`,
-    `📩 New Sell Request:\n\n👤 User: @${ctx.from.username || ctx.from.first_name}\n💫 Stars: ${amount}`
-  );
-});
-
 bot.launch();
-console.log("🚀 Bot is running...");
+console.log("🚀 Bot is running successfully...");
