@@ -1,7 +1,7 @@
 {
   "name": "telegram-stars-swap-bot",
-  "version": "2.0.0",
-  "description": "Telegram bot to convert Stars to USDT or TON using Sevalla",
+  "version": "3.0.0",
+  "description": "Telegram bot to convert Telegram Stars into USDT (BEP20) using Sevalla",
   "main": "index.js",
   "type": "module",
   "scripts": {
